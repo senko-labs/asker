@@ -1,4 +1,4 @@
-<Window x:Class="Asker.SettingsWindow"
+﻿<Window x:Class="Asker.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Name="Root"
@@ -137,6 +137,37 @@
                                 <TextBlock Text="History is stored encrypted on this PC. Pinned results are always kept." Style="{StaticResource Caption}"/>
                             </StackPanel>
                         </DockPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Proxy -->
+                <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                    <StackPanel>
+                        <TextBlock Text="Proxy" Style="{StaticResource Heading}"/>
+                        <TextBlock Text="API requests go through this proxy. Leave the host empty to use the Windows proxy setting. Use socks5://host for a SOCKS proxy."
+                                   Style="{StaticResource Caption}" Margin="0,2,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition/>
+                                <ColumnDefinition Width="10"/>
+                                <ColumnDefinition/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="10"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="Host" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <TextBox x:Name="ProxyHostBox" Grid.Row="1" LostFocus="OnKeyChanged" AutomationProperties.Name="Proxy host"/>
+                            <TextBlock Text="Port" Grid.Column="2" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <TextBox x:Name="ProxyPortBox" Grid.Row="1" Grid.Column="2" LostFocus="OnKeyChanged" AutomationProperties.Name="Proxy port"/>
+                            <TextBlock Text="Username (optional)" Grid.Row="3" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <TextBox x:Name="ProxyUserBox" Grid.Row="4" LostFocus="OnKeyChanged" AutomationProperties.Name="Proxy username"/>
+                            <TextBlock Text="Password (optional)" Grid.Row="3" Grid.Column="2" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <PasswordBox x:Name="ProxyPasswordBox" Grid.Row="4" Grid.Column="2" LostFocus="OnKeyChanged" AutomationProperties.Name="Proxy password"/>
+                        </Grid>
                     </StackPanel>
                 </Border>
 

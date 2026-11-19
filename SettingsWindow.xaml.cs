@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
@@ -33,6 +33,10 @@ public partial class SettingsWindow : Window
         ToggleBox.Text = settings.ToggleHotkey;
         StartupBox.IsChecked = Startup.IsEnabled;
         HideCaptureBox.IsChecked = settings.HideFromCapture;
+        ProxyHostBox.Text = settings.ProxyHost;
+        ProxyPortBox.Text = settings.ProxyPort == 0 ? "" : settings.ProxyPort.ToString();
+        ProxyUserBox.Text = settings.ProxyUser;
+        ProxyPasswordBox.Password = settings.ProxyPassword;
         // A value not in the list (hand-edited settings.json) shows as the nearest longer choice.
         int retention = Array.FindIndex(RetentionDays, d => d >= settings.HistoryDays);
         RetentionBox.SelectedIndex = retention < 0 ? RetentionDays.Length - 1 : retention;
@@ -54,13 +58,19 @@ public partial class SettingsWindow : Window
     async void LoadModels()
     {
         var key = KeyBox.Password.Trim();
-        if (key == "" || key == _loadedKey) return;
-        _loadedKey = key;
+        if (ProxyError() is { } proxyError) { Error.Text = proxyError; return; }
+        var proxy = new Settings();
+        ApplyProxy(proxy);
+        // Reload when the key or the proxy changes, so a wrong proxy shows up here instead of on the first hotkey.
+        var state = string.Join("|", key, proxy.ProxyHost, proxy.ProxyPort, proxy.ProxyUser, ProxyPasswordBox.Password);
+        if (key == "" || state == _loadedKey) return;
+        _loadedKey = state;
         try
         {
+            using var http = App.CreateHttp(proxy); // the form's proxy, not the saved one
             using var req = new HttpRequestMessage(HttpMethod.Get, App.Api + "/models");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-            using var res = await App.Http.SendAsync(req);
+            using var res = await http.SendAsync(req);
             res.EnsureSuccessStatusCode();
             using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
             var ids = doc.RootElement.GetProperty("data").EnumerateArray().Select(m => m.GetProperty("id").GetString()!).Order();
@@ -73,6 +83,23 @@ public partial class SettingsWindow : Window
             _loadedKey = "";
             Error.Text = "Could not load models: " + ex.Message;
         }
+    }
+
+    string? ProxyError()
+    {
+        var host = ProxyHostBox.Text.Trim();
+        if (host == "") return null;
+        if (!int.TryParse(ProxyPortBox.Text.Trim(), out var port) || port is < 1 or > 65535) return "Proxy port must be a number from 1 to 65535.";
+        try { App.ProxyUri(host, port); return null; }
+        catch (UriFormatException) { return "Proxy host is not valid."; }
+    }
+
+    void ApplyProxy(Settings s)
+    {
+        s.ProxyHost = ProxyHostBox.Text.Trim();
+        s.ProxyPort = s.ProxyHost == "" ? 0 : int.Parse(ProxyPortBox.Text.Trim());
+        s.ProxyUser = s.ProxyHost == "" ? "" : ProxyUserBox.Text.Trim();
+        s.ProxyPassword = s.ProxyHost == "" ? "" : ProxyPasswordBox.Password;
     }
 
     void OnAdd(object sender, RoutedEventArgs e) =>
@@ -107,6 +134,8 @@ public partial class SettingsWindow : Window
             if (string.IsNullOrWhiteSpace(b.Model)) { Error.Text = $"{b.Hotkey} needs a model."; return; }
             if (string.IsNullOrWhiteSpace(b.Prompt)) { Error.Text = $"{b.Hotkey} needs a prompt."; return; }
         }
+        if (ProxyError() is { } proxyError) { Error.Text = proxyError; return; }
+        ApplyProxy(Result);
         Result.ToggleHotkey = ToggleBox.Text;
         Result.ApiKey = KeyBox.Password.Trim();
         Startup.IsEnabled = StartupBox.IsChecked == true;

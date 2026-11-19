@@ -17,7 +17,23 @@ public partial class App : Application
     public static Settings Settings = Settings.Load();
     public const string Api = "https://inference-api.nousresearch.com/v1";
     // The API sits behind Cloudflare, which answers 403 to requests without a User-Agent.
-    public static readonly HttpClient Http = new() { DefaultRequestHeaders = { { "User-Agent", "Asker/1.0" } } };
+    public static HttpClient Http { get; private set; } = CreateHttp(Settings);
+
+    // Rebuilt when settings are saved: a handler's proxy can't change after its first request.
+    public static HttpClient CreateHttp(Settings s)
+    {
+        var handler = new HttpClientHandler(); // no proxy host = Windows system proxy, as before
+        if (s.ProxyHost != "")
+            handler.Proxy = new System.Net.WebProxy(ProxyUri(s.ProxyHost, s.ProxyPort))
+            {
+                Credentials = s.ProxyUser == "" ? null : new System.Net.NetworkCredential(s.ProxyUser, s.ProxyPassword),
+            };
+        return new HttpClient(handler) { DefaultRequestHeaders = { { "User-Agent", "Asker/1.0" } } };
+    }
+
+    // "proxy.example.com" -> http://proxy.example.com:port; a scheme like socks5:// is kept.
+    public static Uri ProxyUri(string host, int port) =>
+        new UriBuilder(host.Contains("://") ? host : "http://" + host) { Port = port }.Uri;
     const int ToggleId = 1000;
 
     Mutex? _mutex;
@@ -136,6 +152,7 @@ public partial class App : Application
         {
             Settings = _settings.Result;
             Settings.Save();
+            Http = CreateHttp(Settings); // old client is left for any answer still streaming on it
             ApplyCaptureSetting(_result);
             _result.ApplyRetention();
         }

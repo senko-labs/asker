@@ -38,18 +38,27 @@ public class Settings
         new() { Hotkey = "Ctrl+Alt+T", Prompt = "Translate this to English. Reply with the translation only." },
     };
 
+    // Proxy for API calls; empty host = use the Windows system proxy. Host may include a scheme (http://, socks5://).
+    public string ProxyHost { get; set; } = "";
+    public int ProxyPort { get; set; }
+    public string ProxyUser { get; set; } = "";
+    public string ProxyPasswordProtected { get; set; } = "";
+
     [JsonIgnore]
-    public string ApiKey
+    public string ApiKey { get => Unprotect(ApiKeyProtected); set => ApiKeyProtected = Protect(value); }
+
+    [JsonIgnore]
+    public string ProxyPassword { get => Unprotect(ProxyPasswordProtected); set => ProxyPasswordProtected = Protect(value); }
+
+    static string Unprotect(string protectedText)
     {
-        get
-        {
-            if (ApiKeyProtected == "") return "";
-            try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(ApiKeyProtected), null, DataProtectionScope.CurrentUser)); }
-            catch (Exception e) when (e is CryptographicException or FormatException) { return ""; }
-        }
-        set => ApiKeyProtected = value == "" ? "" :
-            Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser));
+        if (protectedText == "") return "";
+        try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(protectedText), null, DataProtectionScope.CurrentUser)); }
+        catch (Exception e) when (e is CryptographicException or FormatException) { return ""; }
     }
+
+    static string Protect(string value) => value == "" ? "" :
+        Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser));
 
     public static Settings Load()
     {
