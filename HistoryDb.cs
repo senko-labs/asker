@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
@@ -19,7 +20,7 @@ public static class HistoryDb
     static byte[] Protect(byte[] data) => ProtectedData.Protect(data, Entropy, DataProtectionScope.CurrentUser);
     static byte[] Unprotect(byte[] data) => ProtectedData.Unprotect(data, Entropy, DataProtectionScope.CurrentUser);
     static byte[] Encrypt(string text) => Protect(Encoding.UTF8.GetBytes(text));
-    static string DecryptText(SqliteDataReader r, int col) => Encoding.UTF8.GetString(Unprotect((byte[])r[col]));
+    static string DecryptText(object blob) => Encoding.UTF8.GetString(Unprotect((byte[])blob));
 
     static SqliteConnection Open()
     {
@@ -70,27 +71,34 @@ public static class HistoryDb
     // (e.g. after a Windows profile reset) are skipped.
     public static List<ResultItem> Load()
     {
-        using var db = Open();
-        using var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned FROM history ORDER BY id").ExecuteReader();
-        var items = new List<ResultItem>();
-        while (r.Read())
+        // Read raw rows first, then decrypt in parallel: DPAPI costs ~0.65 ms per call and there are 3 per row
+        // (measured 3.8 s for 2000 rows sequentially).
+        var rows = new List<(long Id, string Time, bool HasImage, object Source, object Prompt, object Result, bool Pinned)>();
+        using (var db = Open())
+        using (var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned FROM history ORDER BY id").ExecuteReader())
+            while (r.Read())
+                rows.Add((r.GetInt64(0), r.GetString(1), r.GetBoolean(2), r[3], r[4], r[5], r.GetInt64(6) == 1));
+
+        var items = new ResultItem?[rows.Count];
+        System.Threading.Tasks.Parallel.For(0, rows.Count, i =>
         {
+            var row = rows[i];
             try
             {
-                items.Add(new ResultItem
+                items[i] = new ResultItem
                 {
-                    Id = r.GetInt64(0),
-                    Time = DateTime.Parse(r.GetString(1)),
-                    HasImage = r.GetBoolean(2),
-                    Source = DecryptText(r, 3),
-                    Prompt = DecryptText(r, 4),
-                    Result = DecryptText(r, 5),
-                    Pinned = r.GetInt64(6) == 1,
-                });
+                    Id = row.Id,
+                    Time = DateTime.Parse(row.Time),
+                    HasImage = row.HasImage,
+                    Source = DecryptText(row.Source),
+                    Prompt = DecryptText(row.Prompt),
+                    Result = DecryptText(row.Result),
+                    Pinned = row.Pinned,
+                };
             }
-            catch (Exception e) when (e is CryptographicException or InvalidCastException or FormatException) { }
-        }
-        return items;
+            catch (Exception e) when (e is CryptographicException or InvalidCastException or FormatException) { } // skipped
+        });
+        return items.Where(i => i != null).ToList()!;
     }
 
     public static byte[]? LoadImage(long id)

@@ -8,8 +8,10 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -30,38 +32,80 @@ public class ResultItem : INotifyPropertyChanged
     public DateTime Time { get; init; } = DateTime.Now;
     public string Title => Source != "" ? Source : HasImage || ImagePng != null ? "Image" : "";
 
+    // One-line trimmed TextBlocks still lay out the whole string (measured ~110 ms per pinned card with full text vs ~10 ms
+    // cut to 200 chars), so collapsed/sidebar displays bind these instead of the full text.
+    const int PreviewChars = 200;
+    static string Cut(string s) => s.Length <= PreviewChars ? s : s[..PreviewChars];
+    public string TitlePreview => Cut(Title);
+    public string ResultPreview => Cut(Result);
+
     public bool Matches(string query) =>
         Source.Contains(query, StringComparison.CurrentCultureIgnoreCase)
         || Prompt.Contains(query, StringComparison.CurrentCultureIgnoreCase)
         || Result.Contains(query, StringComparison.CurrentCultureIgnoreCase);
 
-    BitmapImage? _image;
-    public BitmapImage? Image
+    // Display copies sized to what is shown (px = 2x DIP to cover 200% scaling): a 128 px thumbnail while collapsed (64 DIP),
+    // up to 800 px while expanded (400 DIP), freed on collapse. A full 2048x1152 decode is 9 MB per image
+    // (measured +181 MB for 20 units); copying uses Decode() at full size.
+    const int ThumbHeight = 128, ExpandedMaxHeight = 800;
+    BitmapImage? _thumb, _large;
+    public BitmapImage? Image => Expanded ? _large ??= Decode(ExpandedMaxHeight) : _thumb ??= Decode(ThumbHeight);
+
+    public BitmapImage? Decode(int maxHeight = 0)
     {
-        get
-        {
-            if (_image != null) return _image;
-            byte[]? png = ImagePng;
-            if (png == null && HasImage)
-                try { png = HistoryDb.LoadImage(Id); }
-                catch (Exception e) when (e is SqliteException or IOException or System.Security.Cryptography.CryptographicException) { }
-            if (png == null) return null;
-            _image = new BitmapImage();
-            _image.BeginInit();
-            _image.CacheOption = BitmapCacheOption.OnLoad;
-            _image.StreamSource = new MemoryStream(png);
-            _image.EndInit();
-            _image.Freeze();
-            return _image;
-        }
+        byte[]? png = ImagePng;
+        if (png == null && HasImage)
+            try { png = HistoryDb.LoadImage(Id); }
+            catch (Exception e) when (e is SqliteException or IOException or System.Security.Cryptography.CryptographicException) { }
+        if (png == null) return null;
+        var img = new BitmapImage();
+        img.BeginInit();
+        img.CacheOption = BitmapCacheOption.OnLoad;
+        img.StreamSource = new MemoryStream(png);
+        if (maxHeight > 0 && BitmapDecoder.Create(new MemoryStream(png), BitmapCreateOptions.DelayCreation, BitmapCacheOption.None).Frames[0].PixelHeight > maxHeight)
+            img.DecodePixelHeight = maxHeight; // never upscale small images
+        img.EndInit();
+        img.Freeze();
+        return img;
     }
 
     string _result = "";
-    public string Result { get => _result; set { _result = value; Changed(nameof(Result)); } }
+    public string Result { get => _result; set { _result = value; Changed(nameof(Result)); Changed(nameof(ResultPreview)); } }
+
+    // Streaming: every Result change re-lays out the whole answer (measured ~28 ms per token on a 6k-char answer),
+    // so tokens are buffered and published at most every 50 ms. Call Flush() before writing Result directly.
+    StringBuilder? _pending;
+    DispatcherTimer? _flushTimer;
+
+    public void Append(string text)
+    {
+        (_pending ??= new StringBuilder(_result)).Append(text);
+        _flushTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Background, (_, _) => Flush(), Dispatcher.CurrentDispatcher);
+        if (!_flushTimer.IsEnabled) _flushTimer.Start();
+    }
+
+    public void Flush()
+    {
+        _flushTimer?.Stop();
+        if (_pending == null) return;
+        var text = _pending.ToString();
+        _pending = null;
+        Result = text;
+    }
     bool _pinned;
     public bool Pinned { get => _pinned; set { _pinned = value; Changed(nameof(Pinned)); } }
     bool _expanded;
-    public bool Expanded { get => _expanded; set { _expanded = value; Changed(nameof(Expanded)); } }
+    public bool Expanded
+    {
+        get => _expanded;
+        set
+        {
+            _expanded = value;
+            if (!value) _large = null; // free the big display copy
+            Changed(nameof(Expanded));
+            if (HasImage || ImagePng != null) Changed(nameof(Image));
+        }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     void Changed(string name) => PropertyChanged?.Invoke(this, new(name));
@@ -157,13 +201,19 @@ public partial class ResultWindow : Window
         catch (Exception e) when (e is SqliteException or IOException) { item.Result += "\n\n(History not saved: " + e.Message + ")"; }
     }
 
-    // Clipboard image as PNG, scaled so its longest side is at most MaxImageSide. Null if there is none.
-    static byte[]? ClipboardPng()
+    // Clipboard image (UI thread only), frozen so it can be encoded on another thread. Null if there is none.
+    static BitmapSource? ClipboardImage()
     {
         BitmapSource? img;
         try { img = Clipboard.ContainsImage() ? Clipboard.GetImage() : null; }
         catch (COMException) { return null; }
-        if (img == null) return null;
+        if (img is { CanFreeze: true }) img.Freeze();
+        return img;
+    }
+
+    // PNG scaled so its longest side is at most MaxImageSide. Measured ~250 ms for a 4K screenshot, so Ask runs it off the UI thread.
+    static byte[] EncodePng(BitmapSource img)
+    {
         double scale = Math.Min(1, (double)MaxImageSide / Math.Max(img.PixelWidth, img.PixelHeight));
         if (scale < 1) img = new TransformedBitmap(img, new ScaleTransform(scale, scale));
         var enc = new PngBitmapEncoder();
@@ -181,12 +231,33 @@ public partial class ResultWindow : Window
 
     void FocusLast() { if (_history.Count > 0) ScrollTo(_history[^1]); }
 
-    // Scroll so the top of the unit sits at the top of the view (after layout has run).
+    // Scroll so the top of the unit sits at the top of the view (after layout has run). The list is virtualized,
+    // so the unit may not exist yet: bring it into view first, then align it once it has been built.
     void ScrollTo(ResultItem item) => Dispatcher.InvokeAsync(() =>
     {
-        if (History.ItemContainerGenerator.ContainerFromItem(item) is FrameworkElement unit)
-            Scroll.ScrollToVerticalOffset(unit.TranslatePoint(new Point(), History).Y);
+        int index = _history.IndexOf(item);
+        if (index < 0 || History.Template?.FindName("PART_Scroll", History) is not System.Windows.Controls.ScrollViewer scroll) return;
+        _panel ??= FindChild<System.Windows.Controls.VirtualizingStackPanel>(History);
+        if (_panel == null) return; // not shown yet; Toggle/Ask call this again after Show
+        _panel.BringIndexIntoViewPublic(index);
+        Dispatcher.InvokeAsync(() =>
+        {
+            if (History.ItemContainerGenerator.ContainerFromIndex(index) is FrameworkElement unit)
+                scroll.ScrollToVerticalOffset(scroll.VerticalOffset + unit.TranslatePoint(new Point(), scroll).Y);
+        }, DispatcherPriority.Loaded);
     }, DispatcherPriority.Loaded);
+
+    System.Windows.Controls.VirtualizingStackPanel? _panel;
+
+    static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T found || (found = FindChild<T>(child)!) != null) return found;
+        }
+        return null;
+    }
 
     public async void Ask(HotkeyPrompt binding)
     {
@@ -198,7 +269,15 @@ public partial class ResultWindow : Window
         catch (COMException) { clip = ""; } // clipboard locked by another app
 
         // Text wins when both are present (Office etc. put a picture of copied text on the clipboard too).
-        var png = string.IsNullOrWhiteSpace(clip) ? ClipboardPng() : null;
+        var shot = string.IsNullOrWhiteSpace(clip) ? ClipboardImage() : null;
+        byte[]? png = null;
+        if (shot != null)
+        {
+            Show(); // appear right away instead of after the encode
+            Activate();
+            png = shot.IsFrozen ? await Task.Run(() => EncodePng(shot)) : EncodePng(shot);
+            if (cts.IsCancellationRequested) return; // a newer hotkey press took over while encoding
+        }
         var item = new ResultItem { Source = png == null ? clip : "", ImagePng = png, Prompt = binding.Prompt };
         ClearSearch(); // the new unit must be visible
         _all.Add(item);
@@ -249,18 +328,20 @@ public partial class ResultWindow : Window
                 if (data == "[DONE]") break;
                 using var doc = JsonDocument.Parse(data);
                 var root = doc.RootElement;
-                if (root.TryGetProperty("error", out var err)) { item.Result += "\n\nError: " + err; break; }
+                if (root.TryGetProperty("error", out var err)) { item.Flush(); item.Result += "\n\nError: " + err; break; }
                 if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0
                     && choices[0].TryGetProperty("delta", out var delta)
                     && delta.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String)
-                    item.Result += text.GetString();
+                    item.Append(text.GetString()!);
             }
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
         catch (Exception ex) when (!cts.IsCancellationRequested)
         {
+            item.Flush();
             item.Result += (item.Result == "" ? "" : "\n\n") + "Error: " + ex.Message;
         }
+        item.Flush();
         if (item.Result == "") item.Result = cts.IsCancellationRequested ? "(cancelled)" : "(no response)";
         if (item.Id != 0) Save(item, HistoryDb.Update);
     }
@@ -302,7 +383,7 @@ public partial class ResultWindow : Window
         var button = (System.Windows.Controls.Button)sender;
         var item = (ResultItem)button.DataContext;
         bool copied = (string)button.Tag != "Question" ? SetClipboard(item.Result)
-            : item.Image != null ? SetClipboardImage(item.Image)
+            : item.Decode() is { } full ? SetClipboardImage(full) // full resolution, not the display copy
             : SetClipboard($"{item.Source}\n\n{item.Prompt}");
         if (!copied) return;
         // Brief checkmark as feedback, then back to the copy icon.

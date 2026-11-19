@@ -11,11 +11,6 @@
         <!-- No caption; 6px resize border on every edge and corner. -->
         <WindowChrome CaptionHeight="0" ResizeBorderThickness="6" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
     </WindowChrome.WindowChrome>
-    <Window.Resources>
-        <Storyboard x:Key="FadeIn">
-            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.2"/>
-        </Storyboard>
-    </Window.Resources>
     <Border BorderBrush="{DynamicResource Line}" BorderThickness="1">
         <Grid>
             <Grid.ColumnDefinitions>
@@ -37,10 +32,10 @@
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
                                     <Button Style="{StaticResource ListButton}" Margin="0,0,0,2"
-                                            Click="OnPinnedClick" ToolTip="{Binding Title}" AutomationProperties.Name="{Binding Title}">
+                                            Click="OnPinnedClick" ToolTip="{Binding Title}" AutomationProperties.Name="{Binding TitlePreview}">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" MaxHeight="20" FontSize="13"/>
-                                            <TextBlock Text="{Binding Result}" TextTrimming="CharacterEllipsis" MaxHeight="18"
+                                            <TextBlock Text="{Binding TitlePreview}" TextTrimming="CharacterEllipsis" MaxHeight="20" FontSize="13"/>
+                                            <TextBlock Text="{Binding ResultPreview}" TextTrimming="CharacterEllipsis" MaxHeight="18"
                                                        Foreground="{DynamicResource Muted}" FontSize="12" Margin="0,2,0,0"/>
                                         </StackPanel>
                                     </Button>
@@ -84,16 +79,25 @@
                     </Grid>
                 </DockPanel>
 
-                <ScrollViewer x:Name="Scroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" Focusable="False" Padding="20,0,14,8">
-                    <ItemsControl x:Name="History" Focusable="False">
+                <!-- Virtualized: only units on screen (plus a page of cache) are built. Needs the ScrollViewer inside the template. -->
+                <ItemsControl x:Name="History" Grid.Row="1" Focusable="False"
+                              VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                              VirtualizingPanel.ScrollUnit="Pixel" ScrollViewer.CanContentScroll="True">
+                    <ItemsControl.Template>
+                        <ControlTemplate TargetType="ItemsControl">
+                            <ScrollViewer x:Name="PART_Scroll" VerticalScrollBarVisibility="Auto" Focusable="False" Padding="20,0,14,8">
+                                <ItemsPresenter/>
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </ItemsControl.Template>
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel Margin="0,0,0,24">
-                                    <StackPanel.Triggers>
-                                        <EventTrigger RoutedEvent="Loaded">
-                                            <BeginStoryboard Storyboard="{StaticResource FadeIn}"/>
-                                        </EventTrigger>
-                                    </StackPanel.Triggers>
 
                                     <!-- Unit header: time + pin -->
                                     <DockPanel Margin="0,0,0,6">
@@ -143,14 +147,16 @@
                                                 </Button.Style>
                                             </Button>
                                             <StackPanel Grid.Column="1" Margin="6,3,8,3">
-                                                <TextBlock Text="{Binding Title}" TextWrapping="Wrap" LineHeight="22" LineStackingStrategy="BlockLineHeight"
-                                                           Foreground="{DynamicResource Muted}">
+                                                <TextBlock TextWrapping="Wrap" LineHeight="22" LineStackingStrategy="BlockLineHeight">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
+                                                            <Setter Property="Text" Value="{Binding TitlePreview}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource Muted}"/>
                                                             <Setter Property="MaxHeight" Value="22"/>
                                                             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Expanded}" Value="True">
+                                                                    <Setter Property="Text" Value="{Binding Title}"/>
                                                                     <Setter Property="MaxHeight" Value="Infinity"/>
                                                                     <Setter Property="TextTrimming" Value="None"/>
                                                                     <Setter Property="Foreground" Value="{DynamicResource Text}"/>
@@ -208,21 +214,23 @@
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="Visibility" Value="Collapsed"/>
                                                         <Style.Triggers>
+                                                            <!-- Pulse only while waiting: a running animation keeps WPF rendering frames even when hidden. -->
                                                             <DataTrigger Binding="{Binding Result}" Value="">
                                                                 <Setter Property="Visibility" Value="Visible"/>
+                                                                <DataTrigger.EnterActions>
+                                                                    <BeginStoryboard x:Name="Pulse">
+                                                                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                                                            <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.35" Duration="0:0:0.7"/>
+                                                                        </Storyboard>
+                                                                    </BeginStoryboard>
+                                                                </DataTrigger.EnterActions>
+                                                                <DataTrigger.ExitActions>
+                                                                    <RemoveStoryboard BeginStoryboardName="Pulse"/>
+                                                                </DataTrigger.ExitActions>
                                                             </DataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
                                                 </TextBlock.Style>
-                                                <TextBlock.Triggers>
-                                                    <EventTrigger RoutedEvent="Loaded">
-                                                        <BeginStoryboard>
-                                                            <Storyboard RepeatBehavior="Forever" AutoReverse="True">
-                                                                <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.35" Duration="0:0:0.7"/>
-                                                            </Storyboard>
-                                                        </BeginStoryboard>
-                                                    </EventTrigger>
-                                                </TextBlock.Triggers>
                                             </TextBlock>
                                             <TextBox Text="{Binding Result, Mode=OneWay}" Style="{StaticResource SelectableText}" Margin="0,3,0,0"
                                                      AutomationProperties.Name="Answer"/>
@@ -233,8 +241,7 @@
                                 </StackPanel>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+                </ItemsControl>
 
                 <!-- Empty state -->
                 <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="24">
