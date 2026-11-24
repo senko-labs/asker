@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -29,6 +29,7 @@ public class ResultItem : INotifyPropertyChanged
     public byte[]? ImagePng { get; init; } // set on new units; loaded units fetch theirs on demand (HasImage)
     public bool HasImage { get; init; }
     public string Prompt { get; init; } = "";
+    public string Model { get; init; } = "";
     public DateTime Time { get; init; } = DateTime.Now;
     public string Title => Source != "" ? Source : HasImage || ImagePng != null ? "Image" : "";
 
@@ -39,8 +40,19 @@ public class ResultItem : INotifyPropertyChanged
     public string TitlePreview => Cut(Title);
     public string ResultPreview => Cut(Result);
 
+    // Custom title set by renaming a pinned item; "" = use the question.
+    string _name = "";
+    public string Name { get => _name; set { _name = value; Changed(nameof(Name)); Changed(nameof(DisplayName)); } }
+    public string DisplayName => Name != "" ? Name : TitlePreview;
+    bool _renaming;
+    public bool Renaming { get => _renaming; set { _renaming = value; Changed(nameof(Renaming)); } }
+
+    // The request streaming into this unit, if any (each unit runs on its own, so several can stream at once).
+    public CancellationTokenSource? Cts { get; set; }
+
     public bool Matches(string query) =>
-        Source.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+        Name.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+        || Source.Contains(query, StringComparison.CurrentCultureIgnoreCase)
         || Prompt.Contains(query, StringComparison.CurrentCultureIgnoreCase)
         || Result.Contains(query, StringComparison.CurrentCultureIgnoreCase);
 
@@ -84,6 +96,14 @@ public class ResultItem : INotifyPropertyChanged
         if (!_flushTimer.IsEnabled) _flushTimer.Start();
     }
 
+    // Rerun: drop the old answer, including text still waiting in the buffer.
+    public void Reset()
+    {
+        _flushTimer?.Stop();
+        _pending = null;
+        Result = "";
+    }
+
     public void Flush()
     {
         _flushTimer?.Stop();
@@ -117,7 +137,6 @@ public partial class ResultWindow : Window
     // Add load-more-on-scroll if people need to browse further back without searching.
     const int MaxShown = 100;
     const int MaxImageSide = 2048; // downscale big screenshots before sending
-    CancellationTokenSource? _cts;
     readonly List<ResultItem> _all = new();                          // every unit, oldest first (decrypted, without images)
     readonly ObservableCollection<ResultItem> _history = new();      // what the list shows
     readonly ObservableCollection<ResultItem> _pinned = new();
@@ -140,6 +159,7 @@ public partial class ResultWindow : Window
             _all.Add(new ResultItem { Result = "Could not load history: " + e.Message });
         }
         foreach (var item in _all.Where(i => i.Pinned)) _pinned.Add(item);
+        SetSidebarCollapsed(App.Settings.SidebarCollapsed);
         UpdateSidebar();
         Refresh();
     }
@@ -214,6 +234,10 @@ public partial class ResultWindow : Window
     // PNG scaled so its longest side is at most MaxImageSide. Measured ~250 ms for a 4K screenshot, so Ask runs it off the UI thread.
     static byte[] EncodePng(BitmapSource img)
     {
+        // Screenshot tools put 32-bit bitmaps on the clipboard with the 4th byte 0; WPF reads that as fully transparent,
+        // which made the thumbnail invisible and sent the model a blank image. Such images are opaque, so drop the alpha.
+        if ((img.Format == PixelFormats.Bgra32 || img.Format == PixelFormats.Pbgra32) && AllTransparent(img))
+            img = new FormatConvertedBitmap(img, PixelFormats.Bgr32, null, 0);
         double scale = Math.Min(1, (double)MaxImageSide / Math.Max(img.PixelWidth, img.PixelHeight));
         if (scale < 1) img = new TransformedBitmap(img, new ScaleTransform(scale, scale));
         var enc = new PngBitmapEncoder();
@@ -221,6 +245,14 @@ public partial class ResultWindow : Window
         using var ms = new MemoryStream();
         enc.Save(ms);
         return ms.ToArray();
+    }
+
+    static bool AllTransparent(BitmapSource img)
+    {
+        var px = new byte[img.PixelWidth * img.PixelHeight * 4];
+        img.CopyPixels(px, img.PixelWidth * 4, 0);
+        for (int i = 3; i < px.Length; i += 4) if (px[i] != 0) return false;
+        return true;
     }
 
     public void Toggle()
@@ -261,9 +293,6 @@ public partial class ResultWindow : Window
 
     public async void Ask(HotkeyPrompt binding)
     {
-        _cts?.Cancel();
-        var cts = _cts = new CancellationTokenSource();
-
         string clip;
         try { clip = Clipboard.GetText(); }
         catch (COMException) { clip = ""; } // clipboard locked by another app
@@ -276,9 +305,8 @@ public partial class ResultWindow : Window
             Show(); // appear right away instead of after the encode
             Activate();
             png = shot.IsFrozen ? await Task.Run(() => EncodePng(shot)) : EncodePng(shot);
-            if (cts.IsCancellationRequested) return; // a newer hotkey press took over while encoding
         }
-        var item = new ResultItem { Source = png == null ? clip : "", ImagePng = png, Prompt = binding.Prompt };
+        var item = new ResultItem { Source = png == null ? clip : "", ImagePng = png, Prompt = binding.Prompt, Model = binding.Model };
         ClearSearch(); // the new unit must be visible
         _all.Add(item);
         _history.Add(item);
@@ -288,15 +316,24 @@ public partial class ResultWindow : Window
         FocusLast();
 
         if (string.IsNullOrWhiteSpace(clip) && png == null) { item.Result = "Clipboard has no text or image."; return; }
+        await Run(item, png);
+    }
+
+    // Streams an answer into the unit. Other units keep streaming; only this unit's previous request is replaced.
+    async Task Run(ResultItem item, byte[]? png)
+    {
         if (App.Settings.ApiKey == "") { item.Result = "Set your Nous Portal API key in Settings."; return; }
-        if (binding.Model == "") { item.Result = $"Choose a model for {binding.Hotkey} in Settings."; return; }
-        Save(item, i => HistoryDb.Insert(i, binding.Model));
+        if (item.Model == "") { item.Result = "Choose a model for this hotkey in Settings."; return; }
+        if (item.Id == 0) Save(item, i => HistoryDb.Insert(i, i.Model));
+
+        item.Cts?.Cancel();
+        var cts = item.Cts = new CancellationTokenSource();
 
         object content = png == null
-            ? $"{binding.Prompt}\n\n<clipboard>\n{clip}\n</clipboard>"
+            ? $"{item.Prompt}\n\n<clipboard>\n{item.Source}\n</clipboard>"
             : new object[]
             {
-                new { type = "text", text = binding.Prompt },
+                new { type = "text", text = item.Prompt },
                 new { type = "image_url", image_url = new { url = "data:image/png;base64," + Convert.ToBase64String(png) } },
             };
 
@@ -306,7 +343,7 @@ public partial class ResultWindow : Window
             {
                 Content = JsonContent.Create(new
                 {
-                    model = binding.Model,
+                    model = item.Model,
                     stream = true,
                     messages = new[] { new { role = "user", content } },
                 }),
@@ -314,25 +351,24 @@ public partial class ResultWindow : Window
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", App.Settings.ApiKey);
             using var res = await App.Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             if (!res.IsSuccessStatusCode)
-            {
                 item.Result = $"Error {(int)res.StatusCode}: {await res.Content.ReadAsStringAsync(cts.Token)}";
-                return;
-            }
-
-            // OpenAI-style server-sent events: "data: {json}" lines, ending with "data: [DONE]".
-            using var reader = new StreamReader(await res.Content.ReadAsStreamAsync(cts.Token));
-            while (await reader.ReadLineAsync(cts.Token) is string line)
+            else
             {
-                if (!line.StartsWith("data:")) continue;
-                var data = line[5..].Trim();
-                if (data == "[DONE]") break;
-                using var doc = JsonDocument.Parse(data);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("error", out var err)) { item.Flush(); item.Result += "\n\nError: " + err; break; }
-                if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0
-                    && choices[0].TryGetProperty("delta", out var delta)
-                    && delta.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String)
-                    item.Append(text.GetString()!);
+                // OpenAI-style server-sent events: "data: {json}" lines, ending with "data: [DONE]".
+                using var reader = new StreamReader(await res.Content.ReadAsStreamAsync(cts.Token));
+                while (await reader.ReadLineAsync(cts.Token) is string line && !cts.IsCancellationRequested)
+                {
+                    if (!line.StartsWith("data:")) continue;
+                    var data = line[5..].Trim();
+                    if (data == "[DONE]") break;
+                    using var doc = JsonDocument.Parse(data);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("error", out var err)) { item.Flush(); item.Result += "\n\nError: " + err; break; }
+                    if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0
+                        && choices[0].TryGetProperty("delta", out var delta)
+                        && delta.TryGetProperty("content", out var text) && text.ValueKind == JsonValueKind.String)
+                        item.Append(text.GetString()!);
+                }
             }
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
@@ -341,9 +377,85 @@ public partial class ResultWindow : Window
             item.Flush();
             item.Result += (item.Result == "" ? "" : "\n\n") + "Error: " + ex.Message;
         }
+        if (item.Cts != cts) return; // rerun or deleted meanwhile: the newer state owns the unit
+        item.Cts = null;
         item.Flush();
         if (item.Result == "") item.Result = cts.IsCancellationRequested ? "(cancelled)" : "(no response)";
         if (item.Id != 0) Save(item, HistoryDb.Update);
+    }
+
+    async void OnRerun(object sender, RoutedEventArgs e)
+    {
+        var item = (ResultItem)((FrameworkElement)sender).DataContext;
+        byte[]? png = item.ImagePng;
+        if (png == null && item.HasImage)
+            try { png = HistoryDb.LoadImage(item.Id); }
+            catch (Exception ex) when (ex is SqliteException or IOException or System.Security.Cryptography.CryptographicException) { }
+        if (item.Source == "" && png == null) return; // nothing was asked (e.g. "Clipboard has no text or image.")
+        item.Cts?.Cancel();
+        item.Cts = null;
+        item.Reset();
+        await Run(item, png);
+    }
+
+    void OnDelete(object sender, RoutedEventArgs e)
+    {
+        var item = (ResultItem)((FrameworkElement)sender).DataContext;
+        item.Cts?.Cancel();
+        item.Cts = null;
+        _all.Remove(item);
+        _history.Remove(item);
+        if (_pinned.Remove(item)) UpdateSidebar();
+        if (item.Id != 0)
+            try { HistoryDb.Delete(item.Id); }
+            catch (Exception ex) when (ex is SqliteException or IOException) { } // gone from the list; the row comes back next launch
+    }
+
+    // Pinned list: double-click a card to rename it; Enter or clicking away saves, Esc cancels, empty restores the question.
+    void OnRenameStart(object sender, MouseButtonEventArgs e)
+    {
+        var button = (FrameworkElement)sender;
+        var item = (ResultItem)button.DataContext;
+        var box = ((System.Windows.Controls.Panel)button.Parent).Children.OfType<System.Windows.Controls.TextBox>().First();
+        box.Text = item.Name != "" ? item.Name : item.TitlePreview;
+        item.Renaming = true;
+        Dispatcher.InvokeAsync(() => { box.Focus(); box.SelectAll(); }, DispatcherPriority.Loaded);
+        e.Handled = true;
+    }
+
+    void OnRenameKey(object sender, KeyEventArgs e)
+    {
+        var box = (System.Windows.Controls.TextBox)sender;
+        if (e.Key == Key.Enter) { CommitRename(box); e.Handled = true; }
+        else if (e.Key == Key.Escape) { ((ResultItem)box.DataContext).Renaming = false; e.Handled = true; }
+    }
+
+    void OnRenameLostFocus(object sender, RoutedEventArgs e) => CommitRename((System.Windows.Controls.TextBox)sender);
+
+    void CommitRename(System.Windows.Controls.TextBox box)
+    {
+        var item = (ResultItem)box.DataContext;
+        if (!item.Renaming) return; // Esc already cancelled, or Enter already saved
+        item.Renaming = false;
+        var name = box.Text.Trim();
+        item.Name = name == item.TitlePreview ? "" : name;
+        if (item.Id != 0) Save(item, HistoryDb.Update);
+    }
+
+    void OnToggleSidebar(object sender, RoutedEventArgs e)
+    {
+        SetSidebarCollapsed(!App.Settings.SidebarCollapsed);
+        try { App.Settings.Save(); } catch (IOException) { } // only a remembered layout preference
+    }
+
+    void SetSidebarCollapsed(bool collapsed)
+    {
+        App.Settings.SidebarCollapsed = collapsed;
+        Sidebar.Width = collapsed ? 48 : 200;
+        PinnedScroll.Visibility = SidebarTitle.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SidebarToggle.Content = collapsed ? "" : ""; // chevron right / left
+        SidebarToggle.ToolTip = collapsed ? "Show pinned" : "Hide pinned";
+        System.Windows.Automation.AutomationProperties.SetName(SidebarToggle, (string)SidebarToggle.ToolTip);
     }
 
     void OnDrag(object sender, MouseButtonEventArgs e) => DragMove();
@@ -370,6 +482,14 @@ public partial class ResultWindow : Window
         var item = (ResultItem)((FrameworkElement)sender).DataContext;
         if (!_history.Contains(item)) ClearSearch(); // the search is hiding it
         ScrollTo(item);
+    }
+
+    void OnImageClick(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true; // don't start a window drag from the image
+        if (e.ClickCount != 2) return;
+        var item = (ResultItem)((FrameworkElement)sender).DataContext;
+        if (item.Decode() is { } full) new ImageViewer(full, this).Show(); // full resolution, not the thumbnail
     }
 
     void OnExpand(object sender, RoutedEventArgs e)
@@ -408,7 +528,7 @@ public partial class ResultWindow : Window
 
     void OnClose(object sender, RoutedEventArgs e)
     {
-        _cts?.Cancel();
+        foreach (var item in _all) item.Cts?.Cancel();
         Hide();
     }
 }

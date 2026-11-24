@@ -22,23 +22,53 @@
             <Border x:Name="Sidebar" Width="200" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}"
                     BorderThickness="0,0,1,0" Visibility="Collapsed">
                 <DockPanel>
-                    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Height="44" Margin="16,0">
-                        <TextBlock Text="&#xE840;" FontFamily="{StaticResource Icons}" FontSize="11" Foreground="{DynamicResource Accent}"
-                                   VerticalAlignment="Center" Margin="0,0,8,0"/>
-                        <TextBlock Text="Pinned" Style="{StaticResource Heading}" FontSize="13" VerticalAlignment="Center"/>
-                    </StackPanel>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" Focusable="False">
+                    <!-- Header; the chevron collapses the sidebar to a narrow strip (remembered in settings). -->
+                    <DockPanel DockPanel.Dock="Top" Height="44" Margin="8,0">
+                        <Button x:Name="SidebarToggle" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE76B;"
+                                Click="OnToggleSidebar" ToolTip="Hide pinned" AutomationProperties.Name="Hide pinned" VerticalAlignment="Center"/>
+                        <StackPanel x:Name="SidebarTitle" Orientation="Horizontal" Margin="8,0,0,0">
+                            <TextBlock Text="&#xE840;" FontFamily="{StaticResource Icons}" FontSize="11" Foreground="{DynamicResource Accent}"
+                                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <TextBlock Text="Pinned" Style="{StaticResource Heading}" FontSize="13" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <ScrollViewer x:Name="PinnedScroll" VerticalScrollBarVisibility="Auto" Focusable="False">
                         <ItemsControl x:Name="PinnedList" Margin="8,0,8,8" Focusable="False">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Button Style="{StaticResource ListButton}" Margin="0,0,0,2"
-                                            Click="OnPinnedClick" ToolTip="{Binding Title}" AutomationProperties.Name="{Binding TitlePreview}">
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding TitlePreview}" TextTrimming="CharacterEllipsis" MaxHeight="20" FontSize="13"/>
-                                            <TextBlock Text="{Binding ResultPreview}" TextTrimming="CharacterEllipsis" MaxHeight="18"
-                                                       Foreground="{DynamicResource Muted}" FontSize="12" Margin="0,2,0,0"/>
-                                        </StackPanel>
-                                    </Button>
+                                    <!-- Double-click to rename: the card swaps to a text box. -->
+                                    <Grid Margin="0,0,0,2">
+                                        <Button Click="OnPinnedClick" MouseDoubleClick="OnRenameStart"
+                                                ToolTip="{Binding Title}" AutomationProperties.Name="{Binding DisplayName}">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource ListButton}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Renaming}" Value="True">
+                                                            <Setter Property="Visibility" Value="Hidden"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" MaxHeight="20" FontSize="13"/>
+                                                <TextBlock Text="{Binding ResultPreview}" TextTrimming="CharacterEllipsis" MaxHeight="18"
+                                                           Foreground="{DynamicResource Muted}" FontSize="12" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <TextBox VerticalAlignment="Center" KeyDown="OnRenameKey" LostKeyboardFocus="OnRenameLostFocus"
+                                                 AutomationProperties.Name="Rename pinned item">
+                                            <TextBox.Style>
+                                                <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Renaming}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBox.Style>
+                                        </TextBox>
+                                    </Grid>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -99,8 +129,12 @@
                             <DataTemplate>
                                 <StackPanel Margin="0,0,0,24">
 
-                                    <!-- Unit header: time + pin -->
+                                    <!-- Unit header: time + name, then pin / rerun / delete (right-docked in reverse order) -->
                                     <DockPanel Margin="0,0,0,6">
+                                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE74D;" Click="OnDelete"
+                                                ToolTip="Delete" AutomationProperties.Name="Delete"/>
+                                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" Click="OnRerun"
+                                                ToolTip="Rerun" AutomationProperties.Name="Rerun"/>
                                         <Button DockPanel.Dock="Right" Click="OnPin">
                                             <Button.Style>
                                                 <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
@@ -118,7 +152,11 @@
                                                 </Style>
                                             </Button.Style>
                                         </Button>
-                                        <TextBlock Text="{Binding Time, StringFormat=HH:mm}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Time, StringFormat=HH:mm}" Style="{StaticResource Caption}"/>
+                                            <TextBlock Text="{Binding Name}" Style="{StaticResource Caption}" Foreground="{DynamicResource Text}"
+                                                       Margin="10,0,0,0" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
                                     </DockPanel>
 
                                     <!-- Question: one line until expanded. -->
@@ -166,7 +204,8 @@
                                                     </TextBlock.Style>
                                                 </TextBlock>
                                                 <!-- Clipboard image: thumbnail when collapsed, larger when expanded. -->
-                                                <Image Source="{Binding Image}" HorizontalAlignment="Left" Stretch="Uniform" StretchDirection="DownOnly" Margin="0,6,0,0">
+                                                <Image Source="{Binding Image}" HorizontalAlignment="Left" Stretch="Uniform" StretchDirection="DownOnly" Margin="0,6,0,0"
+                                                       MouseLeftButtonDown="OnImageClick" Cursor="Hand" ToolTip="Double-click to zoom">
                                                     <Image.Style>
                                                         <Style TargetType="Image">
                                                             <Setter Property="MaxHeight" Value="64"/>

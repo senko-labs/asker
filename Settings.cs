@@ -38,6 +38,9 @@ public class Settings
         new() { Hotkey = "Ctrl+Alt+T", Prompt = "Translate this to English. Reply with the translation only." },
     };
 
+    // Result window: pinned sidebar collapsed to a narrow strip.
+    public bool SidebarCollapsed { get; set; }
+
     // Proxy for API calls; empty host = use the Windows system proxy. Host may include a scheme (http://, socks5://).
     public string ProxyHost { get; set; } = "";
     public int ProxyPort { get; set; }

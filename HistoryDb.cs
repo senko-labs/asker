@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -53,6 +53,9 @@ public static class HistoryDb
                 pinned INTEGER NOT NULL DEFAULT 0
             )
             """).ExecuteNonQuery();
+        // name (custom title from renaming a pinned item, encrypted) was added after the first release.
+        if ((long)Cmd(db, "SELECT COUNT(*) FROM pragma_table_info('history') WHERE name = 'name'").ExecuteScalar()! == 0)
+            Cmd(db, "ALTER TABLE history ADD COLUMN name BLOB").ExecuteNonQuery();
 
         // One-time migration: rows saved before encryption hold plain text in source (encrypted rows hold a blob).
         using var tx = db.BeginTransaction();
@@ -73,11 +76,11 @@ public static class HistoryDb
     {
         // Read raw rows first, then decrypt in parallel: DPAPI costs ~0.65 ms per call and there are 3 per row
         // (measured 3.8 s for 2000 rows sequentially).
-        var rows = new List<(long Id, string Time, bool HasImage, object Source, object Prompt, object Result, bool Pinned)>();
+        var rows = new List<(long Id, string Time, bool HasImage, object Source, object Prompt, object Result, bool Pinned, string Model, object Name)>();
         using (var db = Open())
-        using (var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned FROM history ORDER BY id").ExecuteReader())
+        using (var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned, model, name FROM history ORDER BY id").ExecuteReader())
             while (r.Read())
-                rows.Add((r.GetInt64(0), r.GetString(1), r.GetBoolean(2), r[3], r[4], r[5], r.GetInt64(6) == 1));
+                rows.Add((r.GetInt64(0), r.GetString(1), r.GetBoolean(2), r[3], r[4], r[5], r.GetInt64(6) == 1, r.GetString(7), r[8]));
 
         var items = new ResultItem?[rows.Count];
         System.Threading.Tasks.Parallel.For(0, rows.Count, i =>
@@ -94,6 +97,8 @@ public static class HistoryDb
                     Prompt = DecryptText(row.Prompt),
                     Result = DecryptText(row.Result),
                     Pinned = row.Pinned,
+                    Model = row.Model,
+                    Name = row.Name is DBNull ? "" : DecryptText(row.Name),
                 };
             }
             catch (Exception e) when (e is CryptographicException or InvalidCastException or FormatException) { } // skipped
@@ -120,8 +125,15 @@ public static class HistoryDb
     public static void Update(ResultItem item)
     {
         using var db = Open();
-        Cmd(db, "UPDATE history SET result = $r, pinned = $pin WHERE id = $id",
-            ("$r", Encrypt(item.Result)), ("$pin", item.Pinned ? 1 : 0), ("$id", item.Id)).ExecuteNonQuery();
+        Cmd(db, "UPDATE history SET result = $r, pinned = $pin, name = $n WHERE id = $id",
+            ("$r", Encrypt(item.Result)), ("$pin", item.Pinned ? 1 : 0), ("$n", item.Name == "" ? null : Encrypt(item.Name)),
+            ("$id", item.Id)).ExecuteNonQuery();
+    }
+
+    public static void Delete(long id)
+    {
+        using var db = Open();
+        Cmd(db, "DELETE FROM history WHERE id = $id", ("$id", id)).ExecuteNonQuery();
     }
 
     // Deletes unpinned rows older than `days` (0 = keep forever). time is ISO 8601 with offset, which julianday() understands.

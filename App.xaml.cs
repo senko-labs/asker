@@ -150,6 +150,7 @@ public partial class App : Application
         _settings = new SettingsWindow(Settings.Clone());
         if (_settings.ShowDialog() == true)
         {
+            _settings.Result.SidebarCollapsed = Settings.SidebarCollapsed; // may have been toggled while the dialog was open
             Settings = _settings.Result;
             Settings.Save();
             Http = CreateHttp(Settings); // old client is left for any answer still streaming on it
