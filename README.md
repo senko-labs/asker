@@ -14,6 +14,8 @@ Answers come from Nous Portal by Nous Research; you need your own API key.
 
 Get `Asker.exe` from [Releases](https://github.com/senko-labs/asker/releases). It runs on 64-bit Windows 10/11 and needs no install or .NET runtime.
 
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [code signing policy](#code-signing-policy). Releases up to v1.3.0 are unsigned.
+
 ## Build
 
 Requires the .NET 8 SDK.
@@ -37,11 +39,9 @@ Nothing else is sent anywhere: no telemetry, analytics or update checks. Your AP
 
 ## Code signing policy
 
-<!-- Add after SignPath Foundation approves the project:
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
--->
 
-Release files are built by GitHub Actions from this repository and are signed only after approval.
+Release files are built by GitHub Actions from this repository and are signed only after a team approver approves each signing request.
 
 Team roles:
 
