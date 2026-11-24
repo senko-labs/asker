@@ -147,7 +147,7 @@ public partial class App : Application
     {
         if (_settings != null) { _settings.Activate(); return; }
         UnregisterHotkeys(); // so pressing an existing hotkey in the editor records it instead of firing
-        _settings = new SettingsWindow(Settings.Clone());
+        _settings = new SettingsWindow(Settings.Clone()) { HistoryImported = _result.ReloadHistory };
         if (_settings.ShowDialog() == true)
         {
             _settings.Result.SidebarCollapsed = Settings.SidebarCollapsed; // may have been toggled while the dialog was open

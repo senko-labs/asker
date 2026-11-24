@@ -55,6 +55,57 @@ public partial class SettingsWindow : Window
 
     void OnKeyChanged(object sender, RoutedEventArgs e) => LoadModels();
 
+    // Set by App: reloads the result window after an import replaced the history.
+    public Action? HistoryImported { get; init; }
+
+    void ShowBackupStatus(string text, bool error = false)
+    {
+        BackupStatus.Text = text;
+        BackupStatus.Visibility = Visibility.Visible;
+        if (error) BackupStatus.SetResourceReference(ForegroundProperty, "Danger");
+        else BackupStatus.ClearValue(ForegroundProperty);
+    }
+
+    void OnExport(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            FileName = $"Asker history {DateTime.Now:yyyy-MM-dd}.db",
+            Filter = "Asker history (*.db)|*.db",
+            DefaultExt = ".db",
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try { ShowBackupStatus($"Exported {HistoryDb.Export(dialog.FileName)} items to {dialog.FileName}"); }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            ShowBackupStatus("Could not export: " + ex.Message, error: true);
+        }
+    }
+
+    void OnImport(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog { Filter = "Asker history (*.db)|*.db|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            int incoming = HistoryDb.CheckImport(dialog.FileName), current = HistoryDb.Count();
+            var answer = MessageBox.Show(this,
+                $"Replace your current history ({current} items) with this file ({incoming} items)?\n\n" +
+                "Answers still being written will stop. Your current history is kept as a backup file in the Asker data folder.",
+                "Import history", MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
+            if (answer != MessageBoxResult.OK) return;
+            HistoryImported?.Invoke(); // first: stop running answers so they don't save into the new file
+            var backup = HistoryDb.Import(dialog.FileName);
+            HistoryImported?.Invoke(); // then: show the imported history
+            ShowBackupStatus($"Imported {incoming} items. Previous history saved as {backup}");
+        }
+        catch (System.IO.InvalidDataException ex) { ShowBackupStatus(ex.Message, error: true); }
+        catch (Exception ex) when (ex is Microsoft.Data.Sqlite.SqliteException or System.IO.IOException or UnauthorizedAccessException)
+        {
+            ShowBackupStatus("Could not import: " + ex.Message, error: true);
+        }
+    }
+
     async void LoadModels()
     {
         var key = KeyBox.Password.Trim();

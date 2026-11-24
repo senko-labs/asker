@@ -143,7 +143,8 @@ public partial class ResultWindow : Window
     const int MaxImageSide = 2048; // downscale big screenshots before sending
     readonly List<ResultItem> _all = new();                          // loaded units: a contiguous run of the newest rows, oldest first
     int _shownFrom;                                                  // without a search, the list shows _all[_shownFrom..]
-    bool _allLoaded, _loading;                                       // _allLoaded: no older rows left in the database
+    bool _allLoaded, _loading;
+    int _generation;                                                 // bumped by ReloadHistory so loads that started before it are dropped                                       // _allLoaded: no older rows left in the database
     readonly SemaphoreSlim _dbLoad = new(1, 1);                      // one older-rows load at a time, or two could fetch the same rows
     readonly Dictionary<long, ResultItem> _pinnedById = new();       // pinned units load first; pages reuse these objects
     readonly ObservableCollection<ResultItem> _history = new();      // what the list shows
@@ -160,6 +161,19 @@ public partial class ResultWindow : Window
         {
             HistoryDb.Init();
             HistoryDb.Cleanup(App.Settings.HistoryDays);
+        }
+        catch (Exception e) when (e is SqliteException or IOException) { } // LoadNewest reports a broken database
+        LoadNewest();
+        SetSidebarCollapsed(App.Settings.SidebarCollapsed);
+        UpdateSidebar();
+        Refresh();
+    }
+
+    // Pinned rows plus the newest page: what the window starts with.
+    void LoadNewest()
+    {
+        try
+        {
             foreach (var item in HistoryDb.LoadPinned()) _pinnedById[item.Id] = item;
             var page = HistoryDb.LoadPage(long.MaxValue, PageSize);
             _allLoaded = page.Count < PageSize;
@@ -171,7 +185,20 @@ public partial class ResultWindow : Window
             _all.Add(new ResultItem { Result = "Could not load history: " + e.Message });
         }
         foreach (var item in _pinnedById.Values.OrderBy(i => i.Id)) _pinned.Add(item);
-        SetSidebarCollapsed(App.Settings.SidebarCollapsed);
+    }
+
+    // After Settings imported a history file: stop running answers (they belong to the old rows) and start over.
+    public void ReloadHistory()
+    {
+        foreach (var item in _all) { item.Cts?.Cancel(); item.Cts = null; }
+        _generation++;
+        _all.Clear();
+        _history.Clear();
+        _pinned.Clear();
+        _pinnedById.Clear();
+        _shownFrom = 0;
+        _allLoaded = false;
+        LoadNewest();
         UpdateSidebar();
         Refresh();
     }
@@ -189,8 +216,10 @@ public partial class ResultWindow : Window
             if (_allLoaded) return;
             List<ResultItem> rows;
             long before = OldestLoadedId;
+            int generation = _generation;
             try { rows = await Task.Run(() => HistoryDb.LoadPage(before, count, minId)); }
             catch (Exception e) when (e is SqliteException or IOException) { _allLoaded = true; return; } // stop trying; what is loaded stays
+            if (generation != _generation) return; // the history was replaced meanwhile
             if (minId == 0 && (count < 0 || rows.Count < count)) _allLoaded = true;
             _all.InsertRange(0, rows.Select(Reuse));
             _shownFrom += rows.Count; // the shown range is unchanged; callers reveal the new rows

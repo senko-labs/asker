@@ -140,6 +140,22 @@
                     </StackPanel>
                 </Border>
 
+                <!-- History backup: export/import act immediately, not on Save. -->
+                <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button Content="Export…" Click="OnExport" Margin="0,0,8,0" AutomationProperties.Name="Export history"/>
+                            <Button Content="Import…" Click="OnImport" AutomationProperties.Name="Import history"/>
+                        </StackPanel>
+                        <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                            <TextBlock Text="History backup" Style="{StaticResource Heading}"/>
+                            <TextBlock Text="Save your history to a .db file, or replace it with one. Backups stay encrypted and can only be imported on this Windows account."
+                                       Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="BackupStatus" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+
                 <!-- Proxy -->
                 <Border Style="{StaticResource Card}" Margin="0,12,0,0">
                     <StackPanel>
