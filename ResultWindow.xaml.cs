@@ -42,8 +42,10 @@ public class ResultItem : INotifyPropertyChanged
 
     // Custom title set by renaming a pinned item; "" = use the question.
     string _name = "";
-    public string Name { get => _name; set { _name = value; Changed(nameof(Name)); Changed(nameof(DisplayName)); } }
+    public string Name { get => _name; set { _name = value; Changed(nameof(Name)); Changed(nameof(DisplayName)); Changed(nameof(Initial)); } }
     public string DisplayName => Name != "" ? Name : TitlePreview;
+    // Collapsed pinned list: first letter of the title (a whole character, so emoji and accented letters stay intact).
+    public string Initial => DisplayName.TrimStart() is { Length: > 0 } t ? System.Globalization.StringInfo.GetNextTextElement(t).ToUpper() : "?";
     bool _renaming;
     public bool Renaming { get => _renaming; set { _renaming = value; Changed(nameof(Renaming)); } }
 
@@ -133,11 +135,17 @@ public class ResultItem : INotifyPropertyChanged
 
 public partial class ResultWindow : Window
 {
-    // shortcut: the list shows at most 100 units (newest unpinned + pinned, or newest search matches); search reaches all of _all.
-    // Add load-more-on-scroll if people need to browse further back without searching.
+    // History loads in pages: the newest PageSize rows at startup, the next PageSize each time the list is scrolled near its top.
+    // Search needs every row (the text is encrypted, so the database can't search it): the first search loads the rest once.
+    const int PageSize = 30;
+    // shortcut: search shows the newest 100 matches; add paging to search results if people need more.
     const int MaxShown = 100;
     const int MaxImageSide = 2048; // downscale big screenshots before sending
-    readonly List<ResultItem> _all = new();                          // every unit, oldest first (decrypted, without images)
+    readonly List<ResultItem> _all = new();                          // loaded units: a contiguous run of the newest rows, oldest first
+    int _shownFrom;                                                  // without a search, the list shows _all[_shownFrom..]
+    bool _allLoaded, _loading;                                       // _allLoaded: no older rows left in the database
+    readonly SemaphoreSlim _dbLoad = new(1, 1);                      // one older-rows load at a time, or two could fetch the same rows
+    readonly Dictionary<long, ResultItem> _pinnedById = new();       // pinned units load first; pages reuse these objects
     readonly ObservableCollection<ResultItem> _history = new();      // what the list shows
     readonly ObservableCollection<ResultItem> _pinned = new();
     readonly DispatcherTimer _searchDelay = new() { Interval = TimeSpan.FromMilliseconds(200) };
@@ -152,34 +160,125 @@ public partial class ResultWindow : Window
         {
             HistoryDb.Init();
             HistoryDb.Cleanup(App.Settings.HistoryDays);
-            _all.AddRange(HistoryDb.Load());
+            foreach (var item in HistoryDb.LoadPinned()) _pinnedById[item.Id] = item;
+            var page = HistoryDb.LoadPage(long.MaxValue, PageSize);
+            _allLoaded = page.Count < PageSize;
+            _all.AddRange(page.Select(Reuse));
         }
         catch (Exception e) when (e is SqliteException or IOException or System.Security.Cryptography.CryptographicException)
         {
+            _allLoaded = true;
             _all.Add(new ResultItem { Result = "Could not load history: " + e.Message });
         }
-        foreach (var item in _all.Where(i => i.Pinned)) _pinned.Add(item);
+        foreach (var item in _pinnedById.Values.OrderBy(i => i.Id)) _pinned.Add(item);
         SetSidebarCollapsed(App.Settings.SidebarCollapsed);
         UpdateSidebar();
         Refresh();
     }
 
+    ResultItem Reuse(ResultItem loaded) => _pinnedById.TryGetValue(loaded.Id, out var existing) ? existing : loaded;
+
+    long OldestLoadedId => _all.Where(i => i.Id != 0).Select(i => i.Id).DefaultIfEmpty(long.MaxValue).Min();
+
+    // Loads older rows into the front of _all: one page, everything (count -1), or down to minId. Runs the decryption off the UI thread.
+    async Task LoadOlder(int count, long minId = 0)
+    {
+        await _dbLoad.WaitAsync();
+        try
+        {
+            if (_allLoaded) return;
+            List<ResultItem> rows;
+            long before = OldestLoadedId;
+            try { rows = await Task.Run(() => HistoryDb.LoadPage(before, count, minId)); }
+            catch (Exception e) when (e is SqliteException or IOException) { _allLoaded = true; return; } // stop trying; what is loaded stays
+            if (minId == 0 && (count < 0 || rows.Count < count)) _allLoaded = true;
+            _all.InsertRange(0, rows.Select(Reuse));
+            _shownFrom += rows.Count; // the shown range is unchanged; callers reveal the new rows
+        }
+        finally { _dbLoad.Release(); }
+    }
+
     // Rebuild the visible list from _all and the search box.
-    void Refresh()
+    async void Refresh()
     {
         var query = Search.Text.Trim();
-        IEnumerable<ResultItem> shown;
         if (query == "")
         {
-            var recent = _all.Where(i => !i.Pinned).TakeLast(MaxShown).ToHashSet();
-            shown = _all.Where(i => i.Pinned || recent.Contains(i));
+            _shownFrom = Math.Max(0, _all.Count - PageSize);
+            Fill(_all.Skip(_shownFrom));
         }
-        else shown = _all.Where(i => i.Matches(query)).TakeLast(MaxShown);
-        _history.Clear();
-        foreach (var item in shown) _history.Add(item);
+        else
+        {
+            if (!_allLoaded)
+            {
+                EmptyTitle.Text = "Searching…";
+                EmptyHint.Text = "Loading your whole history for the first search.";
+                _history.Clear();
+                await LoadOlder(-1);
+                if (Search.Text.Trim() != query) return; // the query changed while loading; that search runs instead
+            }
+            Fill(_all.Where(i => i.Matches(query)).TakeLast(MaxShown));
+        }
         EmptyTitle.Text = query == "" ? "No results yet" : "No matches";
         EmptyHint.Text = query == "" ? "Copy some text and press one of your hotkeys." : $"Nothing in your history contains “{query}”.";
         FocusLast();
+    }
+
+    void Fill(IEnumerable<ResultItem> items)
+    {
+        _history.Clear();
+        foreach (var item in items) _history.Add(item);
+    }
+
+    // Near the top of the list (within one screen): show the next older page, from memory or from the database.
+    async void OnScroll(object sender, System.Windows.Controls.ScrollChangedEventArgs e)
+    {
+        if (e.OriginalSource is not System.Windows.Controls.ScrollViewer scroll || scroll.TemplatedParent != History) return; // not an answer box
+        if (_loading || Search.Text != "" || scroll.VerticalOffset > scroll.ViewportHeight || (_shownFrom == 0 && _allLoaded)) return;
+        // Only when the user scrolls up, or the list doesn't fill the view yet: not while opening jumps to the newest unit.
+        if (e.VerticalChange >= 0 && scroll.ExtentHeight > scroll.ViewportHeight) return;
+        _loading = true;
+        try
+        {
+            if (_shownFrom == 0) await LoadOlder(PageSize);
+            if (Search.Text == "") await ShowOlder(Math.Max(0, _shownFrom - PageSize));
+        }
+        finally { _loading = false; }
+    }
+
+    // Prepend _all[from.._shownFrom] to the list while keeping the top visible unit where it is on screen.
+    async Task ShowOlder(int from)
+    {
+        if (from >= _shownFrom || History.Template?.FindName("PART_Scroll", History) is not System.Windows.Controls.ScrollViewer scroll) return;
+        var anchor = TopVisible(scroll);
+        for (int i = _shownFrom - 1; i >= from; i--) _history.Insert(0, _all[i]);
+        _shownFrom = from;
+        if (anchor is not var (item, top)) return;
+        // Units above the anchor are only estimated until built, so correct a few times as layout settles.
+        for (int pass = 0; pass < 4; pass++)
+        {
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+            if (History.ItemContainerGenerator.ContainerFromItem(item) is not FrameworkElement unit)
+            {
+                // Pushed off screen by the inserted units, so not built: bring it into view, then align it next pass.
+                (_panel ??= FindChild<System.Windows.Controls.VirtualizingStackPanel>(History))?.BringIndexIntoViewPublic(_history.IndexOf(item));
+                continue;
+            }
+            double drift = unit.TranslatePoint(new Point(), scroll).Y - top;
+            if (Math.Abs(drift) < 0.5) return;
+            scroll.ScrollToVerticalOffset(scroll.VerticalOffset + drift);
+        }
+    }
+
+    (ResultItem Item, double Top)? TopVisible(System.Windows.Controls.ScrollViewer scroll)
+    {
+        for (int i = 0; i < _history.Count; i++)
+            if (History.ItemContainerGenerator.ContainerFromIndex(i) is FrameworkElement unit)
+            {
+                double top = unit.TranslatePoint(new Point(), scroll).Y;
+                if (top + unit.ActualHeight > 0) return (_history[i], top);
+            }
+        return null;
     }
 
     void OnSearchChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) { _searchDelay.Stop(); _searchDelay.Start(); }
@@ -201,6 +300,7 @@ public partial class ResultWindow : Window
         catch (Exception e) when (e is SqliteException or IOException) { return; } // keep showing what is still on disk
         var cutoff = DateTime.Now.AddDays(-days);
         _all.RemoveAll(i => !i.Pinned && i.Id != 0 && i.Time < cutoff);
+        _shownFrom = Math.Max(0, _all.Count - PageSize);
         Refresh();
     }
 
@@ -310,7 +410,6 @@ public partial class ResultWindow : Window
         ClearSearch(); // the new unit must be visible
         _all.Add(item);
         _history.Add(item);
-        if (_history.Count(i => !i.Pinned) > MaxShown) _history.Remove(_history.First(i => !i.Pinned));
         Show();
         Activate();
         FocusLast();
@@ -403,7 +502,10 @@ public partial class ResultWindow : Window
         var item = (ResultItem)((FrameworkElement)sender).DataContext;
         item.Cts?.Cancel();
         item.Cts = null;
-        _all.Remove(item);
+        int index = _all.IndexOf(item);
+        if (index >= 0 && index < _shownFrom) _shownFrom--; // shown by a search from outside the browsed range
+        if (index >= 0) _all.RemoveAt(index);
+        _pinnedById.Remove(item.Id);
         _history.Remove(item);
         if (_pinned.Remove(item)) UpdateSidebar();
         if (item.Id != 0)
@@ -452,7 +554,8 @@ public partial class ResultWindow : Window
     {
         App.Settings.SidebarCollapsed = collapsed;
         Sidebar.Width = collapsed ? 48 : 200;
-        PinnedScroll.Visibility = SidebarTitle.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SidebarTitle.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        PinnedList.ItemTemplate = (DataTemplate)FindResource(collapsed ? "PinnedCompact" : "PinnedFull");
         SidebarToggle.Content = collapsed ? "" : ""; // chevron right / left
         SidebarToggle.ToolTip = collapsed ? "Show pinned" : "Hide pinned";
         System.Windows.Automation.AutomationProperties.SetName(SidebarToggle, (string)SidebarToggle.ToolTip);
@@ -477,10 +580,15 @@ public partial class ResultWindow : Window
         if (item.Id != 0) Save(item, HistoryDb.Update);
     }
 
-    void OnPinnedClick(object sender, RoutedEventArgs e)
+    async void OnPinnedClick(object sender, RoutedEventArgs e)
     {
         var item = (ResultItem)((FrameworkElement)sender).DataContext;
-        if (!_history.Contains(item)) ClearSearch(); // the search is hiding it
+        if (!_history.Contains(item))
+        {
+            ClearSearch(); // the search may be hiding it
+            if (!_all.Contains(item) && item.Id != 0) await LoadOlder(-1, minId: item.Id); // older than what is loaded: load down to it
+            if (_all.IndexOf(item) is var index and >= 0 && index < _shownFrom) await ShowOlder(index);
+        }
         ScrollTo(item);
     }
 

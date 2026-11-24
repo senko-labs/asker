@@ -70,15 +70,24 @@ public static class HistoryDb
         tx.Commit();
     }
 
-    // Every row, oldest first, without image bytes (see LoadImage). Rows that can't be decrypted
+    // Every row, oldest first.
+    public static List<ResultItem> Load() => LoadPage(long.MaxValue, -1);
+
+    // Up to `count` rows (-1 = all) with id < beforeId and id >= minId, the newest of them, returned oldest first.
+    public static List<ResultItem> LoadPage(long beforeId, int count, long minId = 0) =>
+        LoadWhere("id < $before AND id >= $min ORDER BY id DESC LIMIT $n", ("$before", beforeId), ("$min", minId), ("$n", count));
+
+    public static List<ResultItem> LoadPinned() => LoadWhere("pinned = 1 ORDER BY id DESC");
+
+    // Rows without image bytes (see LoadImage), oldest first. Rows that can't be decrypted
     // (e.g. after a Windows profile reset) are skipped.
-    public static List<ResultItem> Load()
+    static List<ResultItem> LoadWhere(string where, params (string, object?)[] args)
     {
         // Read raw rows first, then decrypt in parallel: DPAPI costs ~0.65 ms per call and there are 3 per row
         // (measured 3.8 s for 2000 rows sequentially).
         var rows = new List<(long Id, string Time, bool HasImage, object Source, object Prompt, object Result, bool Pinned, string Model, object Name)>();
         using (var db = Open())
-        using (var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned, model, name FROM history ORDER BY id").ExecuteReader())
+        using (var r = Cmd(db, "SELECT id, time, image IS NOT NULL, source, prompt, result, pinned, model, name FROM history WHERE " + where, args).ExecuteReader())
             while (r.Read())
                 rows.Add((r.GetInt64(0), r.GetString(1), r.GetBoolean(2), r[3], r[4], r[5], r.GetInt64(6) == 1, r.GetString(7), r[8]));
 
@@ -103,7 +112,7 @@ public static class HistoryDb
             }
             catch (Exception e) when (e is CryptographicException or InvalidCastException or FormatException) { } // skipped
         });
-        return items.Where(i => i != null).ToList()!;
+        return items.Where(i => i != null).OrderBy(i => i!.Id).ToList()!;
     }
 
     public static byte[]? LoadImage(long id)
