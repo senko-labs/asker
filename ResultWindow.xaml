@@ -12,6 +12,27 @@
         <WindowChrome CaptionHeight="0" ResizeBorderThickness="6" GlassFrameThickness="0" UseAeroCaptionButtons="False"/>
     </WindowChrome.WindowChrome>
     <Window.Resources>
+        <!-- Full-height collapse/expand strip on the left of the question and answer blocks. -->
+        <Style x:Key="Collapser" TargetType="Button" BasedOn="{StaticResource IconButton}">
+            <Setter Property="Height" Value="Auto"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Top"/>
+            <Setter Property="Padding" Value="0,7,0,0"/>
+        </Style>
+
+        <!-- Day separator pill (Slack-style); click for the jump menu. -->
+        <Style x:Key="DatePill" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{DynamicResource Bg}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Line}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,3"/>
+            <Setter Property="MinHeight" Value="0"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="ToolTip" Value="Jump to…"/>
+            <Setter Property="AutomationProperties.Name" Value="Jump to date"/>
+        </Style>
+
         <!-- Pinned list, expanded: title + answer preview; double-click renames; unpin on hover. -->
         <DataTemplate x:Key="PinnedFull">
                                     <!-- Double-click to rename: the card swaps to a text box. -->
@@ -162,6 +183,22 @@
                             <DataTemplate>
                                 <StackPanel Margin="0,0,0,24">
 
+                                    <!-- Day separator: before the first unit of each day. -->
+                                    <Grid Margin="0,4,0,16">
+                                        <Grid.Style>
+                                            <Style TargetType="Grid">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ShowDateHeader}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Grid.Style>
+                                        <Border Height="1" Background="{DynamicResource Line}" VerticalAlignment="Center"/>
+                                        <Button Style="{StaticResource DatePill}" Content="{Binding DateLabel}" HorizontalAlignment="Center" Click="OnDatePill"/>
+                                    </Grid>
+
                                     <!-- Unit header: time + name, then pin / rerun / delete (right-docked in reverse order) -->
                                     <DockPanel Margin="0,0,0,6">
                                         <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE74D;" Click="OnDelete"
@@ -201,9 +238,9 @@
                                                 <ColumnDefinition/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <Button Click="OnExpand" VerticalAlignment="Top">
+                                            <Button Click="OnExpand">
                                                 <Button.Style>
-                                                    <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                                                    <Style TargetType="Button" BasedOn="{StaticResource Collapser}">
                                                         <Setter Property="Content" Value="&#xE70D;"/>
                                                         <Setter Property="ToolTip" Value="Expand"/>
                                                         <Setter Property="AutomationProperties.Name" Value="Expand question"/>
@@ -273,15 +310,32 @@
                                         </Grid>
                                     </Border>
 
-                                    <!-- Answer -->
+                                    <!-- Answer: full until collapsed to one line. -->
                                     <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1"
-                                            CornerRadius="{StaticResource RadiusLarge}" Padding="16,12,6,14">
+                                            CornerRadius="{StaticResource RadiusLarge}" Padding="6">
                                         <Grid>
                                             <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Text="Thinking…" Foreground="{DynamicResource Muted}" Margin="0,3,0,0">
+                                            <Button Click="OnAnswerExpand">
+                                                <Button.Style>
+                                                    <Style TargetType="Button" BasedOn="{StaticResource Collapser}">
+                                                        <Setter Property="Content" Value="&#xE70E;"/>
+                                                        <Setter Property="ToolTip" Value="Collapse"/>
+                                                        <Setter Property="AutomationProperties.Name" Value="Collapse answer"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding AnswerCollapsed}" Value="True">
+                                                                <Setter Property="Content" Value="&#xE70D;"/>
+                                                                <Setter Property="ToolTip" Value="Expand"/>
+                                                                <Setter Property="AutomationProperties.Name" Value="Expand answer"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Button.Style>
+                                            </Button>
+                                            <TextBlock Grid.Column="1" Text="Thinking…" Foreground="{DynamicResource Muted}" Margin="6,3,8,3">
                                                 <TextBlock.Style>
                                                     <Style TargetType="TextBlock">
                                                         <Setter Property="Visibility" Value="Collapsed"/>
@@ -304,9 +358,31 @@
                                                     </Style>
                                                 </TextBlock.Style>
                                             </TextBlock>
-                                            <TextBox Text="{Binding Result, Mode=OneWay}" Style="{StaticResource SelectableText}" Margin="0,3,0,0"
-                                                     AutomationProperties.Name="Answer"/>
-                                            <Button Grid.Column="1" Style="{StaticResource IconButton}" Content="&#xE8C8;" VerticalAlignment="Top" Margin="8,-6,0,0"
+                                            <TextBox Grid.Column="1" Text="{Binding Result, Mode=OneWay}" Margin="6,3,8,3" AutomationProperties.Name="Answer">
+                                                <TextBox.Style>
+                                                    <Style TargetType="TextBox" BasedOn="{StaticResource SelectableText}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding AnswerCollapsed}" Value="True">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBox.Style>
+                                            </TextBox>
+                                            <TextBlock Grid.Column="1" Text="{Binding ResultPreview}" Margin="6,3,8,3" Foreground="{DynamicResource Muted}"
+                                                       TextTrimming="CharacterEllipsis" LineHeight="22" LineStackingStrategy="BlockLineHeight" MaxHeight="22">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding AnswerCollapsed}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <Button Grid.Column="2" Style="{StaticResource IconButton}" Content="&#xE8C8;" VerticalAlignment="Top"
                                                     ToolTip="Copy answer" AutomationProperties.Name="Copy answer" Tag="Answer" Click="OnCopy"/>
                                         </Grid>
                                     </Border>
@@ -314,6 +390,27 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- Sticky day pill: the day of the unit at the top of the view (Slack-style). -->
+                <Button x:Name="StickyDate" Grid.Row="1" Style="{StaticResource DatePill}" VerticalAlignment="Top" HorizontalAlignment="Center"
+                        Margin="20,4,24,0" Click="OnDatePill" Visibility="Collapsed"/>
+
+                <!-- Jump menu, opened from any day pill. -->
+                <Popup x:Name="JumpMenu" StaysOpen="False" Placement="Bottom" AllowsTransparency="True" PopupAnimation="Fade">
+                    <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="1"
+                            CornerRadius="{StaticResource RadiusLarge}" Padding="6" Margin="0,6,0,0">
+                        <StackPanel MinWidth="210">
+                            <TextBlock Text="Jump to…" Style="{StaticResource Caption}" Margin="10,4,10,6"/>
+                            <Button Style="{StaticResource ListButton}" Content="Most recent" Tag="recent" Click="OnJump"/>
+                            <Button Style="{StaticResource ListButton}" Content="Last week" Tag="week" Click="OnJump"/>
+                            <Button Style="{StaticResource ListButton}" Content="Last month" Tag="month" Click="OnJump"/>
+                            <Button Style="{StaticResource ListButton}" Content="Last 3 months" Tag="3months" Click="OnJump"/>
+                            <Border Height="1" Background="{DynamicResource Line}" Margin="4,4"/>
+                            <Button Style="{StaticResource ListButton}" Content="Jump to a specific date…" Click="OnJumpPickDate"/>
+                            <Calendar x:Name="JumpCalendar" Visibility="Collapsed" Margin="0,4,0,0" SelectedDatesChanged="OnJumpDate"/>
+                        </StackPanel>
+                    </Border>
+                </Popup>
 
                 <!-- Empty state -->
                 <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="24">

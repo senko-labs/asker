@@ -114,6 +114,27 @@ public class ResultItem : INotifyPropertyChanged
         _pending = null;
         Result = text;
     }
+    bool _answerCollapsed;
+    public bool AnswerCollapsed { get => _answerCollapsed; set { _answerCollapsed = value; Changed(nameof(AnswerCollapsed)); } }
+
+    // Day separators (Slack-style): set by the window on the first unit of each day in the list.
+    bool _showDateHeader;
+    public bool ShowDateHeader { get => _showDateHeader; set { if (_showDateHeader != value) { _showDateHeader = value; Changed(nameof(ShowDateHeader)); } } }
+    public string DateLabel => DayLabel(Time);
+    public void RefreshDateLabel() => Changed(nameof(DateLabel)); // "Today" becomes "Yesterday" after midnight
+
+    // "Today", "Yesterday", "Monday, November 24th", or with ", 2025" for other years.
+    public static string DayLabel(DateTime time)
+    {
+        DateTime day = time.Date, today = DateTime.Today;
+        if (day == today) return "Today";
+        if (day == today.AddDays(-1)) return "Yesterday";
+        int d = day.Day;
+        string suffix = d % 100 is 11 or 12 or 13 ? "th" : (d % 10) switch { 1 => "st", 2 => "nd", 3 => "rd", _ => "th" };
+        string label = day.ToString("dddd, MMMM d", System.Globalization.CultureInfo.GetCultureInfo("en-US")) + suffix;
+        return day.Year == today.Year ? label : $"{label}, {day.Year}";
+    }
+
     bool _pinned;
     public bool Pinned { get => _pinned; set { _pinned = value; Changed(nameof(Pinned)); } }
     bool _expanded;
@@ -155,6 +176,7 @@ public partial class ResultWindow : Window
     {
         InitializeComponent();
         History.ItemsSource = _history;
+        _history.CollectionChanged += (_, _) => UpdateDateHeaders();
         PinnedList.ItemsSource = _pinned;
         _searchDelay.Tick += (_, _) => { _searchDelay.Stop(); Refresh(); };
         try
@@ -263,6 +285,7 @@ public partial class ResultWindow : Window
     async void OnScroll(object sender, System.Windows.Controls.ScrollChangedEventArgs e)
     {
         if (e.OriginalSource is not System.Windows.Controls.ScrollViewer scroll || scroll.TemplatedParent != History) return; // not an answer box
+        UpdateStickyDate(scroll);
         if (_loading || Search.Text != "" || scroll.VerticalOffset > scroll.ViewportHeight || (_shownFrom == 0 && _allLoaded)) return;
         // Only when the user scrolls up, or the list doesn't fill the view yet: not while opening jumps to the newest unit.
         if (e.VerticalChange >= 0 && scroll.ExtentHeight > scroll.ViewportHeight) return;
@@ -387,7 +410,89 @@ public partial class ResultWindow : Window
     public void Toggle()
     {
         if (IsVisible) Hide();
-        else { Show(); Activate(); FocusLast(); }
+        else
+        {
+            foreach (var item in _history) item.RefreshDateLabel();
+            UpdateDateHeaders();
+            Show(); Activate(); FocusLast();
+        }
+    }
+
+    // ---- Day separators (Slack-style) ----
+
+    void UpdateDateHeaders()
+    {
+        for (int i = 0; i < _history.Count; i++)
+            _history[i].ShowDateHeader = i == 0 || _history[i - 1].Time.Date != _history[i].Time.Date;
+    }
+
+    // The sticky pill shows the day of the unit at the top of the view; it sits exactly where that day's own pill
+    // stops, so the day's pill appears to stick while its units scroll by.
+    void UpdateStickyDate(System.Windows.Controls.ScrollViewer scroll)
+    {
+        _panel ??= FindChild<System.Windows.Controls.VirtualizingStackPanel>(History);
+        ResultItem? top = null;
+        double best = double.MaxValue;
+        if (_panel != null)
+            foreach (UIElement child in _panel.Children) // only the built units, a handful
+                if (child is FrameworkElement { DataContext: ResultItem item } unit)
+                {
+                    double y = unit.TranslatePoint(new Point(), scroll).Y;
+                    if (y + unit.ActualHeight > 0 && y < best) { best = y; top = item; }
+                }
+        StickyDate.Visibility = top == null ? Visibility.Collapsed : Visibility.Visible;
+        if (top == null) return;
+        StickyDate.Content = top.DateLabel;
+        // Center over the same width as the units: list padding 20/14, plus the 10 px scrollbar when shown.
+        StickyDate.Margin = new Thickness(20, 4, 14 + (scroll.ComputedVerticalScrollBarVisibility == Visibility.Visible ? 10 : 0), 0);
+    }
+
+    void OnDatePill(object sender, RoutedEventArgs e)
+    {
+        JumpCalendar.Visibility = Visibility.Collapsed;
+        JumpMenu.PlacementTarget = (UIElement)sender;
+        JumpMenu.IsOpen = true;
+    }
+
+    void OnJump(object sender, RoutedEventArgs e)
+    {
+        switch ((string)((FrameworkElement)sender).Tag)
+        {
+            case "week": JumpTo(DateTime.Now.AddDays(-7)); break;
+            case "month": JumpTo(DateTime.Now.AddMonths(-1)); break;
+            case "3months": JumpTo(DateTime.Now.AddMonths(-3)); break;
+            default: JumpMenu.IsOpen = false; ClearSearch(); FocusLast(); break;
+        }
+    }
+
+    void OnJumpPickDate(object sender, RoutedEventArgs e)
+    {
+        JumpCalendar.DisplayDateEnd = DateTime.Today;
+        JumpCalendar.SelectedDate = null;
+        JumpCalendar.Visibility = Visibility.Visible;
+    }
+
+    void OnJumpDate(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (JumpCalendar.SelectedDate is not DateTime day) return;
+        Mouse.Capture(null); // Calendar keeps the mouse captured after a click, which would swallow the next click
+        JumpTo(day.Date);
+    }
+
+    // Scroll to the first unit at or after `from`, loading older history down to it if needed (like Slack's "Jump to").
+    async void JumpTo(DateTime from)
+    {
+        JumpMenu.IsOpen = false;
+        ClearSearch();
+        long id;
+        try { id = HistoryDb.FirstIdFrom(from); }
+        catch (Exception e) when (e is SqliteException or IOException) { return; }
+        if (id == 0) { FocusLast(); return; } // nothing saved since then: the newest is the closest
+        if (id < OldestLoadedId) await LoadOlder(-1, minId: id);
+        var target = _all.FirstOrDefault(i => i.Id >= id);
+        if (target == null) { FocusLast(); return; }
+        if (_all.IndexOf(target) is var index && index < _shownFrom) await ShowOlder(index);
+        ScrollTo(target);
     }
 
     void FocusLast() { if (_history.Count > 0) ScrollTo(_history[^1]); }
@@ -627,6 +732,12 @@ public partial class ResultWindow : Window
         if (e.ClickCount != 2) return;
         var item = (ResultItem)((FrameworkElement)sender).DataContext;
         if (item.Decode() is { } full) new ImageViewer(full, this).Show(); // full resolution, not the thumbnail
+    }
+
+    void OnAnswerExpand(object sender, RoutedEventArgs e)
+    {
+        var item = (ResultItem)((FrameworkElement)sender).DataContext;
+        item.AnswerCollapsed = !item.AnswerCollapsed;
     }
 
     void OnExpand(object sender, RoutedEventArgs e)

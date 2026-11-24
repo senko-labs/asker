@@ -205,6 +205,14 @@ public static class HistoryDb
         return backup;
     }
 
+    // Oldest row at or after `from` (local time), or 0 if there is none. time is ISO 8601 with offset; julianday() compares it in UTC.
+    public static long FirstIdFrom(DateTime from)
+    {
+        using var db = Open();
+        var t = new DateTimeOffset(DateTime.SpecifyKind(from, DateTimeKind.Local)).ToString("o");
+        return Cmd(db, "SELECT MIN(id) FROM history WHERE julianday(time) >= julianday($t)", ("$t", t)).ExecuteScalar() is long id ? id : 0;
+    }
+
     public static void Delete(long id)
     {
         using var db = Open();
